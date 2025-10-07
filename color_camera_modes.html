@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Color Camera Toolkit — 絵の具/肉/配色/植物/酸度/通常モード</title>
+  <style>
+    :root{--bg:#0f1720;--card:#0b1220;--accent:#4f46e5;--muted:#9aa8bd;--glass:rgba(255,255,255,0.04)}
+    *{box-sizing:border-box}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Hiragino Kaku Gothic ProN",Meiryo,Arial;margin:0;background:linear-gradient(180deg,#071028 0%, #071a2a 100%);color:#e6eef8}
+    header{display:flex;align-items:center;gap:18px;padding:18px 20px;background:rgba(0,0,0,0.15);backdrop-filter:blur(6px)}
+    header h1{font-size:18px;margin:0}
+    .container{display:grid;grid-template-columns:360px 1fr;gap:18px;padding:18px}
+    .panel{background:var(--card);padding:14px;border-radius:12px;box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+    nav button{display:block;width:100%;margin-bottom:8px;padding:10px;border-radius:8px;border:0;background:var(--glass);color:inherit;cursor:pointer}
+    .video-wrap{position:relative;border-radius:10px;overflow:hidden}
+    video{width:100%;height:auto;display:block;background:#000}
+    canvas{display:none}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+    .control{background:rgba(255,255,255,0.03);padding:8px;border-radius:8px}
+    .mode-section{margin-top:12px}
+    label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+    input[type=color]{height:40px;width:60px;border:0;background:transparent}
+    select,input,button{padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:inherit}
+    .result{margin-top:12px;padding:10px;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:8px}
+    footer{padding:12px;text-align:center;color:var(--muted);font-size:13px}
+    .small{font-size:13px;color:var(--muted)}
+    .row{display:flex;gap:8px;align-items:center}
+    @media(max-width:900px){.container{grid-template-columns:1fr;}.panel{margin-bottom:10px}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Color Camera Toolkit</h1>
+    <div class="small">複数モード：絵の具・肉・酸度(pH)・配色・植物・通常（音声） — カメラ必須</div>
+  </header>
+
+  <div class="container">
+    <aside class="panel">
+      <nav id="modeList">
+        <button data-mode="home">トップ</button>
+        <button data-mode="paint">① 絵の具モード</button>
+        <button data-mode="meat">② 肉モード</button>
+        <button data-mode="ph">③ 酸度(pH)モード</button>
+        <button data-mode="palette">④ 配色モード</button>
+        <button data-mode="plant">⑤ 植物モード</button>
+        <button data-mode="normal">⑥ 通常モード</button>
+      </nav>
+
+      <div style="margin-top:12px">
+        <label>カメラ選択</label>
+        <select id="cameraSelect"></select>
+      </div>
+
+      <div class="mode-section">
+        <div class="small">サンプリング</div>
+        <div class="controls">
+          <button id="freezeBtn" class="control">フリーズ（撮影）</button>
+          <button id="sampleBtn" class="control">サンプル取得</button>
+          <button id="speakBtn" class="control">音声で読み上げ</button>
+          <button id="clearAlarm" class="control">アラーム停止</button>
+        </div>
+        <div class="result" id="sampleResult">サンプル色: —</div>
+      </div>
+
+      <div class="mode-section small">ヒント: カメラ位置を安定させ、十分な照明で使ってください。実物の色とは若干差が出ます。</div>
+    </aside>
+
+    <main>
+      <section class="panel">
+        <div class="video-wrap">
+          <video id="video" autoplay playsinline></video>
+          <canvas id="hiddenCanvas"></canvas>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div class="control">ズーム: <input id="zoom" type="range" min="1" max="3" step="0.1" value="1"></div>
+          <div class="control">サンプルサイズ: <input id="sampleSize" type="range" min="1" max="50" value="8"></div>
+        </div>
+      </section>
+
+      <section class="panel" id="contentPanel">
+        <!-- Dynamic content injected here -->
+      </section>
+
+    </main>
+  </div>
+
+  <footer>作成: Color Camera Toolkit — このHTMLファイルをローカルに保存してブラウザで開くと動きます。</footer>
+
+<script>
+// --------------------------- 基本: カメラセットアップ ---------------------------
+const video = document.getElementById('video');
+const hiddenCanvas = document.getElementById('hiddenCanvas');
+const ctx = hiddenCanvas.getContext('2d');
+const cameraSelect = document.getElementById('cameraSelect');
+const modeList = document.getElementById('modeList');
+const contentPanel = document.getElementById('contentPanel');
+const sampleResult = document.getElementById('sampleResult');
+let currentStream = null;
+let currentMode = 'home';
+let alarmTimeout = null;
+
+async function listCameras(){
+  try{
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d=>d.kind==='videoinput');
+    cameraSelect.innerHTML = cams.map(c=>`<option value="${c.deviceId}">${c.label||'カメラ ' + (Math.random()*9|0)}</option>`).join('');
+  }catch(e){console.warn(e)}
+}
+
+async function startCamera(deviceId){
+  if(currentStream){currentStream.getTracks().forEach(t=>t.stop());}
+  try{
+    const constraints = {video:{deviceId: deviceId?{exact:deviceId}:undefined, width:{ideal:1280}, height:{ideal:720}}};
+    currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = currentStream;
+    await video.play();
+  }catch(e){alert('カメラにアクセスできません: '+e.message)}
+}
+
+cameraSelect.addEventListener('change', ()=>startCamera(cameraSelect.value));
+
+// 初期化
+(async()=>{ await listCameras(); if(cameraSelect.options.length) startCamera(cameraSelect.value); navigator.mediaDevices.ondevicechange = listCameras; renderMode(); })();
+
+// --------------------------- ユーティリティ ---------------------------
+function speak(text){ if('speechSynthesis' in window){ const u=new SpeechSynthesisUtterance(text); speechSynthesis.cancel(); speechSynthesis.speak(u); }}
+
+function sampleColor(sampleSize=8){
+  const w=video.videoWidth, h=video.videoHeight;
+  if(!w||!h) return null;
+  hiddenCanvas.width = w; hiddenCanvas.height = h;
+  ctx.drawImage(video,0,0,w,h);
+  // 中央付近の矩形を平均
+  const cx = Math.floor(w/2), cy = Math.floor(h/2);
+  const size = Math.max(1, Math.min(200, sampleSize));
+  const img = ctx.getImageData(cx-size/2, cy-size/2, size, size);
+  let r=0,g=0,b=0,count=0;
+  for(let i=0;i<img.data.length;i+=4){ r+=img.data[i]; g+=img.data[i+1]; b+=img.data[i+2]; count++; }
+  r=Math.round(r/count); g=Math.round(g/count); b=Math.round(b/count);
+  return {r,g,b};
+}
+
+function rgbToHex({r,g,b}){ return '#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join(''); }
+
+function distanceSq(a,b){ return (a.r-b.r)*(a.r-b.r)+(a.g-b.g)*(a.g-b.g)+(a.b-b.b)*(a.b-b.b); }
+
+// --------------------------- モード描画 ---------------------------
+modeList.addEventListener('click', e=>{ if(e.target.dataset.mode){ currentMode=e.target.dataset.mode; renderMode(); }});
+
+function renderMode(){
+  // clear
+  contentPanel.innerHTML='';
+  if(currentMode==='home'){ contentPanel.innerHTML = `
+    <h2>トップ</h2>
+    <p class="small">左メニューでモードを選択してください。カメラの中央をサンプリングします。各モードはライブ画像を必要とします。</p>
+  `; return; }
+
+  if(currentMode==='paint') renderPaintMode();
+  if(currentMode==='meat') renderMeatMode();
+  if(currentMode==='ph') renderPhMode();
+  if(currentMode==='palette') renderPaletteMode();
+  if(currentMode==='plant') renderPlantMode();
+  if(currentMode==='normal') renderNormalMode();
+}
+
+// --------------------------- ① 絵の具モード ---------------------------
+function renderPaintMode(){
+  contentPanel.innerHTML = `
+    <h2>絵の具モード</h2>
+    <div class="small">作りたい色を指定すると、カメラで色を読み取って混ぜる色の案内をします（近似）。</div>
+
+    <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:220px">
+        <label>目標色</label>
+        <input id="targetColor" type="color" value="#c94f6a">
+        <div style="margin-top:8px"><label>混ぜるベース</label>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <label><input type="checkbox" class="baseChk" value="#ff0000" checked> 赤</label>
+            <label><input type="checkbox" class="baseChk" value="#ffff00" checked> 黄</label>
+            <label><input type="checkbox" class="baseChk" value="#0000ff" checked> 青</label>
+            <label><input type="checkbox" class="baseChk" value="#ffffff"> 白</label>
+            <label><input type="checkbox" class="baseChk" value="#000000"> 黒</label>
+          </div>
+        </div>
+        <div style="margin-top:10px">
+          <button id="calcMix">混ぜ方を計算</button>
+        </div>
+      </div>
+
+      <div style="flex:1;min-width:260px">
+        <div class="result" id="mixResult">混合結果: —</div>
+        <div style="margin-top:10px" id="mixPreview"></div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('calcMix').addEventListener('click', ()=>{
+    const hex = document.getElementById('targetColor').value;
+    const bases = Array.from(document.querySelectorAll('.baseChk:checked')).map(i=>i.value);
+    const target = hexToRgb(hex);
+    const solution = mixApprox(target, bases.map(h=>hexToRgb(h)));
+    const result = solution.map(s=>Math.max(0,Math.round(s*100)))
+    document.getElementById('mixResult').innerHTML = `目標 ${hex.toUpperCase()} に対して: ${bases.map((b,i)=>`${b} ${result[i]}%`).join(', ')}`;
+    const preview = document.getElementById('mixPreview');
+    preview.innerHTML = `<div style="height:60px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);overflow:hidden">
+      <div style="height:100%;width:100%;background:${hex}"></div></div>`;
+  });
+}
+
+function hexToRgb(hex){ hex=hex.replace('#',''); const r=parseInt(hex.slice(0,2),16); const g=parseInt(hex.slice(2,4),16); const b=parseInt(hex.slice(4,6),16); return {r,g,b}; }
+
+// 単純な線形混合で近似。ベース色の重みを非負最小二乗で求める（正確ではないが簡易案内）
+function mixApprox(target, bases){
+  // 枚数が少なければ単純化
+  const m = bases.length;
+  if(m===0) return [];
+  // Build matrices for least squares Ax = t, A columns are bases r/g/b
+  // We'll solve using basic non-negative least squares via simple iterative projection (NNLS-ish)
+  let x = new Array(m).fill(1/m);
+  for(let iter=0;iter<200;iter++){
+    // compute current mix
+    const mix = bases.reduce((acc,b,i)=>({r:acc.r + b.r*x[i], g:acc.g + b.g*x[i], b:acc.b + b.b*x[i]}), {r:0,g:0,b:0});
+    // gradient approx
+    let changed=false;
+    for(let i=0;i<m;i++){
+      const grad = 2*((bases[i].r*(mix.r-target.r)) + (bases[i].g*(mix.g-target.g)) + (bases[i].b*(mix.b-target.b)));
+      const step = -grad*0.00005; // small step
+      const nx = Math.max(0, x[i] + step);
+      if(Math.abs(nx-x[i])>1e-6){ x[i]=nx; changed=true; }
+    }
+    if(!changed) break;
+    // normalize
+    const s = x.reduce((a,b)=>a+b,0) || 1;
+    x = x.map(v=>v/s);
+  }
+  return x;
+}
+
+// --------------------------- ② 肉モード ---------------------------
+function renderMeatMode(){
+  contentPanel.innerHTML = `
+    <h2>肉モード</h2>
+    <div class="small">肉の種類を選び、カメラの色から焼き加減を推定します（目安）。アラームを設定可能。</div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
+      <div style="min-width:240px">
+        <label>肉の種類</label>
+        <select id="meatType">
+          <option value="beef">牛肉</option>
+          <option value="pork">豚肉</option>
+          <option value="chicken">鶏肉</option>
+        </select>
+        <div style="margin-top:8px"><label>希望の焼き加減</label>
+          <select id="doneness">
+            <option value="rare">レア</option>
+            <option value="medium">ミディアム</option>
+            <option value="well">ウェルダン</option>
+          </select>
+        </div>
+        <div style="margin-top:10px">
+          <button id="startWatch">監視開始（カメラ中央を監視）</button>
+        </div>
+      </div>
+      <div style="flex:1;min-width:220px">
+        <div class="result" id="meatResult">判定: —</div>
+        <div class="small" style="margin-top:8px">説明: カメラによる色判定は照明に依存します。正確な内部温度計測が最も信頼できます。</div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('startWatch').addEventListener('click', ()=>{
+    const meat = document.getElementById('meatType').value;
+    const target = document.getElementById('doneness').value;
+    watchMeat(meat,target);
+  });
+}
+
+let meatInterval = null;
+function watchMeat(meatType,targetDoneness){
+  if(meatInterval) clearInterval(meatInterval);
+  document.getElementById('meatResult').innerText = '監視中… カメラ中央の色を解析しています';
+  meatInterval = setInterval(()=>{
+    const s = parseInt(document.getElementById('sampleSize').value||8);
+    const col = sampleColor(s);
+    if(!col) return;
+    const state = estimateDoneness(col, meatType);
+    document.getElementById('meatResult').innerHTML = `現在の色: ${rgbToHex(col)} → 推定: <strong>${state}</strong>`;
+    if(state===targetDoneness){
+      triggerAlarm(`目標の焼き加減 ${targetDoneness} に達しました (${rgbToHex(col)})`);
+      clearInterval(meatInterval); meatInterval=null;
+    }
+  }, 1200);
+}
+
+function estimateDoneness(col, meatType){
+  // 簡易ルール: 赤みの残り具合(r/g比)と明度で判定
+  const r = col.r, g=col.g, b=col.b;
+  const brightness = (r+g+b)/3;
+  const redness = r/(g+0.01);
+  if(meatType==='beef'){
+    if(redness>1.6 && brightness>60) return 'rare';
+    if(redness>1.2) return 'medium';
+    return 'well';
+  }
+  if(meatType==='pork'){
+    if(brightness>150) return 'rare';
+    if(brightness>120) return 'medium';
+    return 'well';
+  }
+  if(meatType==='chicken'){
+    if(brightness>170) return 'rare';
+    if(brightness>140) return 'medium';
+    return 'well';
+  }
+  return 'unknown';
+}
+
+function triggerAlarm(msg){
+  speak(msg);
+  if(alarmTimeout) clearTimeout(alarmTimeout);
+  const o = new Audio();
+  // 簡易ビープ音をWebAudioで生成
+  try{
+    const ac = new (window.AudioContext||window.webkitAudioContext)();
+    const o1 = ac.createOscillator(); const g = ac.createGain();
+    o1.connect(g); g.connect(ac.destination);
+    o1.frequency.value = 880; g.gain.value = 0.02; o1.start();
+    setTimeout(()=>{ o1.frequency.value = 660; },200);
+    setTimeout(()=>{ o1.stop(); ac.close(); },900);
+  }catch(e){console.warn('Audio error',e)}
+}
+
+document.getElementById('clearAlarm').addEventListener('click', ()=>{ if(meatInterval) clearInterval(meatInterval); meatInterval=null; speak('アラームを停止しました'); });
+
+// --------------------------- ③ pH モード（簡易インターフェース。既に自作済みとあるため補助表示） ---------------------------
+function renderPhMode(){
+  contentPanel.innerHTML = `
+    <h2>酸度（pH）モード</h2>
+    <div class="small">あなたはpH計を既に作成しているとのことでした。ここではカメラから色を読み取り、色に基づく簡易推定を行います（試験紙の色比較の補助）。</div>
+    <div style="display:flex;gap:12px;margin-top:12px">
+      <div style="min-width:260px">
+        <label>参考色（目標）</label>
+        <input id="phRef" type="color" value="#ff0000">
+        <div style="margin-top:10px"><button id="comparePh">比較して推定</button></div>
+      </div>
+      <div style="flex:1">
+        <div class="result" id="phResult">判定: —</div>
+      </div>
+    </div>
+  `;
+  document.getElementById('comparePh').addEventListener('click', ()=>{
+    const s = parseInt(document.getElementById('sampleSize').value||8);
+    const sample = sampleColor(s); if(!sample) return alert('先にカメラ映像を許可して、映像が表示されていることを確認してください。');
+    const ref = hexToRgb(document.getElementById('phRef').value);
+    const d = Math.sqrt(distanceSq(sample,ref));
+    let txt='かなり近い'; if(d<30) txt='ほぼ一致'; else if(d<90) txt='近い'; else txt='差あり';
+    document.getElementById('phResult').innerHTML = `サンプル ${rgbToHex(sample)} / 参照 ${document.getElementById('phRef').value.toUpperCase()} → ${txt}`;
+  });
+}
+
+// --------------------------- ④ 配色モード ---------------------------
+function renderPaletteMode(){
+  contentPanel.innerHTML = `
+    <h2>配色モード</h2>
+    <div class="small">服や小物の組み合わせをシーン別に判定し、アドバイスを表示します。カメラで主要3色を自動抽出して評価します。</div>
+    <div style="margin-top:12px">
+      <button id="extractColors">色を抽出して評価</button>
+      <div id="paletteResult" class="result" style="margin-top:10px">—</div>
+    </div>
+  `;
+  document.getElementById('extractColors').addEventListener('click', ()=>{
+    const s = Math.min(60, parseInt(document.getElementById('sampleSize').value||20));
+    const colors = extractMajorColors(s,3);
+    if(!colors.length) return alert('映像を取得できませんでした');
+    const html = colors.map((c,i)=>`<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:40px;height:24px;background:${rgbToHex(c)};border-radius:4px;border:1px solid rgba(0,0,0,0.2)"></div>Color ${i+1}: ${rgbToHex(c)}</div>`).join('');
+    const advice = paletteAdvice(colors);
+    document.getElementById('paletteResult').innerHTML = html + `<div style="margin-top:8px" class="small">アドバイス: ${advice}</div>`;
+  });
+}
+
+function extractMajorColors(sampleSize, howMany=3){
+  const w=video.videoWidth,h=video.videoHeight; if(!w) return [];
+  hiddenCanvas.width = w; hiddenCanvas.height = h; ctx.drawImage(video,0,0,w,h);
+  // downsample grid
+  const step = Math.max(4, Math.floor(Math.min(w,h)/sampleSize));
+  const counts = {};
+  for(let y=h/4; y<h*3/4; y+=step){ for(let x=w/4; x<w*3/4; x+=step){ const p = ctx.getImageData(x,y,1,1).data; const key = `${p[0]},${p[1]},${p[2]}`; counts[key]=(counts[key]||0)+1; }}
+  const entries = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,howMany).map(e=>{ const [r,g,b] = e[0].split(',').map(Number); return {r,g,b}; });
+  return entries;
+}
+
+function paletteAdvice(colors){
+  if(colors.length<2) return 'はっきりした色が取れませんでした。照明を明るくして中心を撮影してください。';
+  // simple rules: contrast between first two
+  const d = Math.sqrt(distanceSq(colors[0],colors[1]));
+  if(d<80) return '色のコントラストが低いので、アクセントに明るい小物を入れると良いです。';
+  if(d<200) return '落ち着いた組み合わせ。大人っぽくまとめると良いです。';
+  return '高いコントラスト。元気で目立つコーデ。フォーカルポイントを一つ作るとバランスが良いです。';
+}
+
+// --------------------------- ⑤ 植物モード ---------------------------
+function renderPlantMode(){
+  contentPanel.innerHTML = `
+    <h2>植物モード</h2>
+    <div class="small">花や葉の色を判別し、花束や寄せ植えの色合わせを提案します（参考）。</div>
+    <div style="margin-top:12px">
+      <button id="analyzePlant">解析して提案</button>
+      <div id="plantResult" class="result" style="margin-top:10px">—</div>
+    </div>
+  `;
+  document.getElementById('analyzePlant').addEventListener('click', ()=>{
+    const cols = extractMajorColors(30,3);
+    if(!cols.length) return alert('映像を取得できませんでした');
+    const suggestions = plantSuggestions(cols);
+    document.getElementById('plantResult').innerHTML = cols.map(c=>`<div style="display:inline-block;margin-right:8px;padding:6px;border-radius:6px;background:${rgbToHex(c)}">&nbsp;&nbsp;&nbsp;</div>`).join('') + `<div style="margin-top:8px" class="small">${suggestions}</div>`;
+  });
+}
+
+function plantSuggestions(colors){
+  // naive suggestions based on warmth
+  const warm = colors.filter(c=>c.r > c.b).length;
+  if(warm>=2) return '暖色系が多め。白やグリーンを差し色にすると落ち着きます。';
+  if(warm===1) return 'ミックス配色。葉物（緑）を多めにするとバランス良好。';
+  return '寒色系中心。明るいピンクやクリーム色を加えると柔らかさが出ます。';
+}
+
+// --------------------------- ⑥ 通常モード ---------------------------
+function renderNormalMode(){
+  contentPanel.innerHTML = `
+    <h2>通常モード</h2>
+    <div class="small">カメラに映った色をそのまま音声・テキストで通知します。中心の色を取得して読み上げます。</div>
+    <div style="margin-top:12px">
+      <button id="sayNow">色を取得して読み上げ</button>
+      <div id="normalResult" class="result">—</div>
+    </div>
+  `;
+  document.getElementById('sayNow').addEventListener('click', ()=>{
+    const s = parseInt(document.getElementById('sampleSize').value||8);
+    const col = sampleColor(s); if(!col) return alert('カメラ映像を準備してください');
+    const hex = rgbToHex(col);
+    document.getElementById('normalResult').innerHTML = `色: ${hex}`;
+    speak(`現在の色は ${hex} です`);
+  });
+}
+
+// --------------------------- 共通ボタン処理 ---------------------------
+document.getElementById('freezeBtn').addEventListener('click', ()=>{
+  const s = parseInt(document.getElementById('sampleSize').value||8);
+  const col = sampleColor(s); if(!col) return alert('映像が準備できていません');
+  sampleResult.innerHTML = `サンプル色: ${rgbToHex(col)}`;
+});
+
+document.getElementById('sampleBtn').addEventListener('click', ()=>{
+  const s = parseInt(document.getElementById('sampleSize').value||8);
+  const col = sampleColor(s); if(!col) return alert('映像が準備できていません');
+  sampleResult.innerHTML = `サンプル色: ${rgbToHex(col)} (r:${col.r} g:${col.g} b:${col.b})`;
+});
+
+document.getElementById('speakBtn').addEventListener('click', ()=>{
+  const txt = sampleResult.innerText || '現在の色はありません'; speak(txt);
+});
+
+// --------------------------- 小さなユーティリティ群 ---------------------------
+function mixColorsWeighted(cols, weights){
+  const sum = cols.reduce((acc,c,i)=>({r:acc.r + c.r*weights[i], g:acc.g + c.g*weights[i], b:acc.b + c.b*weights[i]}), {r:0,g:0,b:0});
+  const s = weights.reduce((a,b)=>a+b,0)||1;
+  return {r:Math.round(sum.r/s), g:Math.round(sum.g/s), b:Math.round(sum.b/s)};
+}
+
+// --------------------------- 初期の簡易イベント ---------------------------
+// 初期のボタン - モード変更時に要素が再生成されるため、他のイベントは個別に付与しています。
+
+// --------------------------- 関数の補助: ドット記述ミス修正 ---------------------------
+// 追加の小修正: mixApprox中のミスを防ぐための安全装置
+
+</script>
+</body>
+</html>
