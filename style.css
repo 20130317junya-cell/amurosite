@@ -3,7 +3,7 @@
 body {
   margin: 0;
   font-family: "Mochiy Pop One", Arial, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
-  background-image: url(aaa.png);
+  background: url(aaa.png);
 }
 
 section {
